@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: elder-care-backend
+    env: docker
+    plan: free
+    region: singapore
+    dockerfilePath: Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRE_MINUTES
+        value: "1440"
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: TZ_LOCAL
+        value: "Asia/Jakarta"
+      - key: SIM_TICK_SECONDS
+        value: "3"
+      - key: INACTIVITY_MIN
+        value: "90"
+      - key: LLM_PROVIDER
+        value: "gemini"
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: "gemini-1.5-flash"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: "documents"
