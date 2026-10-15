@@ -32,8 +32,18 @@ os.makedirs("uploads", exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1. Create tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        if "user:pass" in settings.DATABASE_URL or "ep-xyz" in settings.DATABASE_URL:
+            print("\n" + "=" * 80)
+            print("ERROR: DATABASE_URL contains placeholder credentials ('user:pass' or 'ep-xyz').")
+            print("Please edit .env with your actual PostgreSQL connection string.")
+            print("For local PostgreSQL: DATABASE_URL=postgresql://postgres:admin@127.0.0.1:5432/eldercare")
+            print("For Neon: DATABASE_URL=postgresql://<user>:<pass>@<endpoint>.neon.tech/eldercare?sslmode=require")
+            print("=" * 80 + "\n")
+        raise e
 
     # 2. Seed data if DB is empty, or backfill downtime gap
     await seed_database_if_empty()

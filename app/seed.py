@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta, date, time
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any
 
-from sqlalchemy import select, func, insert
+from sqlalchemy import select, func, insert, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
