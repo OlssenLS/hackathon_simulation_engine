@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, and_, desc
+from sqlalchemy import select, and_, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -60,6 +60,26 @@ async def acknowledge_alert(
     await db.refresh(alert)
 
     return alert
+
+
+@router.post("/elders/{elder_id}/alerts/ack-all")
+async def acknowledge_all_elder_alerts(
+    elder_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    await verify_elder_access(elder_id, user, db, allow_elder_self=True)
+
+    now = datetime.now(timezone.utc)
+    stmt = (
+        update(Alert)
+        .where(and_(Alert.elder_id == elder_id, Alert.acknowledged == False))
+        .values(acknowledged=True, acknowledged_at=now)
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+
+    return {"status": "ok", "count": result.rowcount}
 
 
 @router.post("/elders/{elder_id}/sos", response_model=AlertOut, status_code=status.HTTP_201_CREATED)
