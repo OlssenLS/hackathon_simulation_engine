@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from typing import List, Dict, Any
 
 from sqlalchemy import select, func, insert, and_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -60,6 +61,7 @@ async def generate_backfill_for_elder(
     medications: List[Medication],
     start_dt: datetime,
     end_dt: datetime,
+    seed_alerts: bool = True,
 ):
     """Generates 1 sample/minute backfill between start_dt and end_dt."""
     has_hypertension = "Hipertensi" in conditions
@@ -225,6 +227,16 @@ async def generate_backfill_for_elder(
     days_back = int((end_dt - start_dt).days) + 1
     start_date = (start_dt.astimezone(JAKARTA_TZ)).date()
 
+    # Pre-fetch existing (medication_id, scheduled_at) in window to prevent unique constraint conflicts
+    existing_stmt = select(MedLog.medication_id, MedLog.scheduled_at).where(
+        and_(
+            MedLog.elder_id == elder_id,
+            MedLog.scheduled_at >= start_dt,
+            MedLog.scheduled_at <= end_dt,
+        )
+    )
+    existing_records = set((await db.execute(existing_stmt)).all())
+
     for d_offset in range(days_back):
         d = start_date + timedelta(days=d_offset)
         weekday = d.weekday()
@@ -236,6 +248,9 @@ async def generate_backfill_for_elder(
                 sched_local = datetime.combine(d, time(hh, mm), tzinfo=JAKARTA_TZ)
                 sched_utc = sched_local.astimezone(timezone.utc)
                 if sched_utc < start_dt or sched_utc > end_dt:
+                    continue
+
+                if (med.id, sched_utc) in existing_records:
                     continue
 
                 roll = random.random()
@@ -257,51 +272,59 @@ async def generate_backfill_for_elder(
                     "status": status,
                     "confirmed_at": conf_at,
                 })
+                existing_records.add((med.id, sched_utc))
 
     if med_logs_batch:
-        await db.execute(insert(MedLog).values(med_logs_batch))
+        stmt = (
+            pg_insert(MedLog)
+            .values(med_logs_batch)
+            .on_conflict_do_nothing(index_elements=["medication_id", "scheduled_at"])
+        )
+        await db.execute(stmt)
 
-    # Historical alerts (2 to 3 mild alerts)
-    historical_alerts = [
-        {
-            "id": str(uuid.uuid4()),
-            "elder_id": elder_id,
-            "type": "bp_high",
-            "severity": "warning",
-            "message": f"Tekanan darah {name} agak tinggi: 144/92 mmHg.",
-            "payload": {"systolic": 144, "diastolic": 92},
-            "source": "rule",
-            "ts": end_dt - timedelta(days=3, hours=4),
-            "acknowledged": True,
-            "acknowledged_at": end_dt - timedelta(days=3, hours=3, minutes=45),
-        },
-        {
-            "id": str(uuid.uuid4()),
-            "elder_id": elder_id,
-            "type": "geofence_exit",
-            "severity": "warning",
-            "message": f"{name} keluar dari area aman (±180 m dari rumah).",
-            "payload": {"distance_from_home_m": 180.0},
-            "source": "rule",
-            "ts": end_dt - timedelta(days=5, hours=2),
-            "acknowledged": True,
-            "acknowledged_at": end_dt - timedelta(days=5, hours=1, minutes=50),
-        },
-        {
-            "id": str(uuid.uuid4()),
-            "elder_id": elder_id,
-            "type": "med_missed",
-            "severity": "warning",
-            "message": f"Jadwal obat {medications[0].name} terlewat.",
-            "payload": {"medication_name": medications[0].name},
-            "source": "rule",
-            "ts": end_dt - timedelta(days=1, hours=8),
-            "acknowledged": True,
-            "acknowledged_at": end_dt - timedelta(days=1, hours=7, minutes=30),
-        },
-    ]
-    await db.execute(insert(Alert).values(historical_alerts))
+    # Historical alerts (2 to 3 mild alerts only when initial seeding)
+    if seed_alerts and medications:
+        historical_alerts = [
+            {
+                "id": str(uuid.uuid4()),
+                "elder_id": elder_id,
+                "type": "bp_high",
+                "severity": "warning",
+                "message": f"Tekanan darah {name} agak tinggi: 144/92 mmHg.",
+                "payload": {"systolic": 144, "diastolic": 92},
+                "source": "rule",
+                "ts": end_dt - timedelta(days=3, hours=4),
+                "acknowledged": True,
+                "acknowledged_at": end_dt - timedelta(days=3, hours=3, minutes=45),
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "elder_id": elder_id,
+                "type": "geofence_exit",
+                "severity": "warning",
+                "message": f"{name} keluar dari area aman (±180 m dari rumah).",
+                "payload": {"distance_from_home_m": 180.0},
+                "source": "rule",
+                "ts": end_dt - timedelta(days=5, hours=2),
+                "acknowledged": True,
+                "acknowledged_at": end_dt - timedelta(days=5, hours=1, minutes=50),
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "elder_id": elder_id,
+                "type": "med_missed",
+                "severity": "warning",
+                "message": f"Jadwal obat {medications[0].name} terlewat.",
+                "payload": {"medication_name": medications[0].name},
+                "source": "rule",
+                "ts": end_dt - timedelta(days=1, hours=8),
+                "acknowledged": True,
+                "acknowledged_at": end_dt - timedelta(days=1, hours=7, minutes=30),
+            },
+        ]
+        await db.execute(insert(Alert).values(historical_alerts))
     await db.commit()
+
 
 
 async def seed_database_if_empty():
@@ -548,5 +571,6 @@ async def backfill_downtime_gap_if_needed():
                     medications=meds,
                     start_dt=start_gap,
                     end_dt=now,
+                    seed_alerts=False,
                 )
 
