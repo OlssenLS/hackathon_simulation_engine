@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Any, List, Optional
@@ -17,7 +18,8 @@ SYSTEM_PROMPT = (
     "Tulis laporan dalam Bahasa Indonesia yang hangat, jelas, dan mudah dipahami orang awam. "
     "Gunakan HANYA data pada statistik yang diberikan; jangan mengarang angka. "
     "Jangan mendiagnosis penyakit dan jangan menyarankan obat atau dosis. "
-    "Jika ada hal yang mengkhawatirkan, sarankan berkonsultasi dengan dokter."
+    "Jika ada hal yang mengkhawatirkan, sarankan berkonsultasi dengan dokter. "
+    "PENTING: Jangan mengulang kalimat, frasa, atau saran yang sama. Tulis secara ringkas, padat, dan segera akhiri setelah saran poin terakhir selesai tanpa repetisi."
 )
 
 DISCLAIMER_LINE = "*Laporan ini dibuat otomatis dari data pemantauan dan bukan pengganti pemeriksaan dokter.*"
@@ -300,6 +302,71 @@ Laporan pemantauan kesehatan {name} ({age} tahun) selama {days} hari terakhir. K
     return content
 
 
+def clean_repetitive_hallucinations(text: str) -> str:
+    """Sanitize LLM output by dropping repetitive loop sentences/paragraphs
+    and trimming trailing cut-off sentence fragments."""
+    if not text:
+        return text
+
+    clean_text = text.replace(DISCLAIMER_LINE, "").strip()
+
+    def dedupe_sentences(p: str) -> str:
+        if p.startswith("#"):
+            return p
+        sentences = re.split(r"(?<=[.!?])\s+", p)
+        res = []
+        seen_s = set()
+        for s in sentences:
+            s_clean = s.strip()
+            if not s_clean:
+                continue
+            s_norm = re.sub(r"^[\d\.\-\+\*\s]+", "", s_clean).lower()[:35]
+            if len(s_norm) >= 15:
+                if s_norm in seen_s:
+                    continue
+                seen_s.add(s_norm)
+            res.append(s_clean)
+        return " ".join(res)
+
+    lines = clean_text.split("\n")
+    cleaned_lines = []
+    seen_prefixes = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+
+        line_deduped = dedupe_sentences(line)
+        norm = re.sub(r"^[\d\.\-\+\*\s]+", "", line_deduped).lower()
+        prefix = norm[:35].strip() if len(norm) >= 15 else norm.strip()
+
+        if prefix and len(prefix) >= 15:
+            if prefix in seen_prefixes:
+                continue
+            seen_prefixes.add(prefix)
+
+        cleaned_lines.append(line_deduped)
+
+    # Cut off trailing incomplete lines or orphan numbering (e.g. "4.", dangling fragments)
+    while cleaned_lines:
+        last = cleaned_lines[-1].strip()
+        if not last:
+            cleaned_lines.pop()
+            continue
+        if re.match(r"^(\d+[\.\)]|[\-\*\+]|#+)\s*$", last):
+            cleaned_lines.pop()
+            continue
+        if not last.endswith((".", "!", "?", "*", ":", "#", "-", ")")):
+            cleaned_lines.pop()
+            continue
+        break
+
+    clean_text = "\n".join(cleaned_lines).rstrip()
+    return f"{clean_text}\n\n{DISCLAIMER_LINE}"
+
+
 async def generate_smart_report(db: AsyncSession, elder_id: str, days: int = 7) -> Report:
     # 1. Aggregate stats
     stats = await aggregate_stats(db, elder_id, days)
@@ -311,10 +378,8 @@ async def generate_smart_report(db: AsyncSession, elder_id: str, days: int = 7) 
 
     try:
         if settings.LLM_API_KEY:
-            content_md = await llm.generate(SYSTEM_PROMPT, user_prompt)
-            # Ensure disclaimer is present
-            if DISCLAIMER_LINE not in content_md:
-                content_md += f"\n\n{DISCLAIMER_LINE}"
+            raw_text = await llm.generate(SYSTEM_PROMPT, user_prompt)
+            content_md = clean_repetitive_hallucinations(raw_text)
     except Exception as e:
         print("LLM generation failed or timed out, using fallback template:", e)
         content_md = None

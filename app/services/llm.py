@@ -54,6 +54,8 @@ async def generate(system: str, user: str) -> str:
                         ],
                         "temperature": 0.4,
                         "max_tokens": 1000,
+                        "frequency_penalty": 0.6,
+                        "presence_penalty": 0.4,
                     }
                     resp = await client.post(url, json=payload, headers=headers)
                     resp.raise_for_status()
