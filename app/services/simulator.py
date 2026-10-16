@@ -32,6 +32,8 @@ class Simulator:
     def init_elder_state(self, elder: ElderProfile, user: User, now: datetime) -> Dict[str, Any]:
         has_hypertension = "Hipertensi" in (elder.conditions or [])
         hr_offset = 4.0 if has_hypertension else 0.0
+        base_sys = 132.0 if has_hypertension else 122.0
+        base_dia = 84.0 if has_hypertension else 78.0
 
         local_dt = now.astimezone(JAKARTA_TZ)
         local_hour = local_dt.hour
@@ -60,6 +62,9 @@ class Simulator:
             "activity_until": now + timedelta(minutes=duration),
             "current_hr": 70.0 + hr_offset,
             "hr_drift": 0.0,
+            "current_sys_bp": base_sys,
+            "current_dia_bp": base_dia,
+            "bp_counter": 0,
             "steps_today": 0,
             "last_day": local_dt.date(),
             "scenario": "normal",
@@ -358,11 +363,12 @@ class Simulator:
                 # steps don't increase, hr flat
                 target_hr = 68.0
 
-            # Smooth HR (alpha=0.3)
-            state["hr_drift"] += random.uniform(-0.3, 0.3)
+            # Smooth HR with physiological beat-to-beat variability (RSA jitter)
+            state["hr_drift"] += random.uniform(-0.6, 0.6)
             state["hr_drift"] = max(-6.0, min(6.0, state["hr_drift"]))
-            target_hr_with_drift = target_hr + state["hr_drift"] + random.gauss(0, 1.0)
-            state["current_hr"] = state["current_hr"] + 0.3 * (target_hr_with_drift - state["current_hr"])
+            instant_jitter = random.uniform(-2.5, 2.5)
+            target_hr_with_drift = target_hr + state["hr_drift"] + instant_jitter
+            state["current_hr"] = state["current_hr"] + 0.45 * (target_hr_with_drift - state["current_hr"])
             hr_val = round(max(30.0, min(190.0, state["current_hr"])), 1)
 
             # SpO2
@@ -451,48 +457,65 @@ class Simulator:
                 "inside_geofence": inside_geofence,
             }
 
-            # Periodic scheduled measurements check
+            # Continuous Ambulatory Blood Pressure (BP)
+            has_hypertension = "Hipertensi" in state.get("conditions", [])
+            base_sys = 132.0 if has_hypertension else 122.0
+            base_dia = 84.0 if has_hypertension else 78.0
+
+            if scenario == "hypertensive":
+                target_sys = 190.0
+                target_dia = 122.0
+            elif scenario == "tachycardia":
+                target_sys = base_sys + 12.0
+                target_dia = base_dia + 6.0
+            elif scenario in ("fall", "bradycardia"):
+                target_sys = base_sys - 18.0
+                target_dia = base_dia - 12.0
+            else:
+                target_sys = base_sys
+                target_dia = base_dia
+
+            if "current_sys_bp" not in state:
+                state["current_sys_bp"] = target_sys
+                state["current_dia_bp"] = target_dia
+
+            # Ambulatory fluctuation: physiological drift + small pulse noise (+- 1.5 mmHg)
+            state["current_sys_bp"] += 0.35 * (target_sys - state["current_sys_bp"]) + random.uniform(-1.5, 1.5)
+            state["current_dia_bp"] += 0.35 * (target_dia - state["current_dia_bp"]) + random.uniform(-1.0, 1.0)
+            sys_bp = round(max(70.0, min(220.0, state["current_sys_bp"])))
+            dia_bp = round(max(40.0, min(140.0, state["current_dia_bp"])))
+
+            # Broadcast BP reading via WebSocket on every tick
+            asyncio.create_task(
+                manager.broadcast_to_elder(
+                    elder_id=elder_id,
+                    event_type="measurement",
+                    data={"kind": "bp", "value1": float(sys_bp), "value2": float(dia_bp), "context": None},
+                    ts=ts_str,
+                )
+            )
+
+            # Persist BP reading to database periodically (every 10 ticks / ~20s) or during hypertensive crisis
+            state["bp_counter"] = state.get("bp_counter", 0) + 1
+            if state["bp_counter"] % 10 == 0 or scenario == "hypertensive":
+                m_id = str(uuid.uuid4())
+                measurements_to_insert.append({
+                    "id": m_id,
+                    "elder_id": elder_id,
+                    "ts": now,
+                    "kind": "bp",
+                    "value1": float(sys_bp),
+                    "value2": float(dia_bp),
+                    "context": None,
+                    "source": "sim",
+                })
+
+            # Periodic scheduled measurements check (e.g. Glucose)
             slot_key = f"{local_date.isoformat()}-{local_hour}"
             last_slot = self.last_periodic_slot.get(elder_id)
             if last_slot != slot_key:
                 self.last_periodic_slot[elder_id] = slot_key
-                has_hypertension = "Hipertensi" in state["conditions"]
                 has_diabetes = "Diabetes" in state["conditions"] or "Diabetes tipe 2" in state["conditions"]
-
-                # BP at 08:00 and 20:00
-                if local_hour in (8, 20):
-                    sys_bp = round(random.gauss(138, 4) if has_hypertension else random.gauss(120, 3))
-                    dia_bp = round(random.gauss(86, 3) if has_hypertension else random.gauss(78, 3))
-                    m_id = str(uuid.uuid4())
-                    measurements_to_insert.append({
-                        "id": m_id,
-                        "elder_id": elder_id,
-                        "ts": now,
-                        "kind": "bp",
-                        "value1": float(sys_bp),
-                        "value2": float(dia_bp),
-                        "context": None,
-                        "source": "sim",
-                    })
-                    asyncio.create_task(
-                        manager.broadcast_to_elder(
-                            elder_id=elder_id,
-                            event_type="measurement",
-                            data={"kind": "bp", "value1": float(sys_bp), "value2": float(dia_bp), "context": None},
-                            ts=ts_str,
-                        )
-                    )
-                    asyncio.create_task(
-                        anomaly_engine.process_measurement(
-                            elder_id=elder_id,
-                            elder_name=state["name"],
-                            kind="bp",
-                            value1=float(sys_bp),
-                            value2=float(dia_bp),
-                            context=None,
-                            now=now,
-                        )
-                    )
 
                 # Glucose at 07:00 (fasting), 13:00 (postprandial), 19:00 (postprandial)
                 if local_hour in (7, 13, 19):

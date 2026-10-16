@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 1440
     CORS_ORIGINS: str = "*"
     TZ_LOCAL: str = "Asia/Jakarta"
-    SIM_TICK_SECONDS: int = 3
+    SIM_TICK_SECONDS: int = 2
     INACTIVITY_MIN: int = 90
     LLM_PROVIDER: str = "gemini"
     LLM_API_KEY: Optional[str] = ""
