@@ -8,6 +8,7 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models import User, ElderProfile, Vital, Measurement, MedLog, Medication, Alert, Report
 from app.services import llm
 
